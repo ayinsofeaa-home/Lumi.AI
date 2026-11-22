@@ -3,7 +3,7 @@
 **SDT2143 Artificial Intelligence in Modern Computing · Mini AI Hackathon**
 **Theme:** AI in Education
 
-🔗 **Live app:** https://YOUR-APP-NAME.streamlit.app
+🔗 **Live app:** https://Lumi-AI-gmi.streamlit.app
 
 Lumi.AI turns a long chapter into a quick revision pack. Upload your notes and get a one-page summary, the key sentences from the original text, and flashcards to test yourself, in seconds.
 
@@ -51,3 +51,57 @@ Before exams, students have to revise from long chapters and lecture slides, oft
 ---
 
 ## 🔄 How it works
+```
+Upload file ─► Extract text (PyPDF2 / python-pptx / python-docx)
+                 │
+                 ├─► Hugging Face MiniLM ─► 8 key sentences
+                 │                              │
+                 └──────────────► Gemini Flash-Lite (one request)
+                                   ├─ 1-page summary
+                                   ├─ flashcards
+                                   └─ translated key sentences
+                                              │
+                                              ▼
+                                   Streamlit web app
+```
+**Reliability:** if a Gemini model is busy (error 503), the app retries and then switches to a backup model automatically.
+
+---
+
+## 🛠️ Development journey
+| Version | Approach | Result |
+|---|---|---|
+| v1 | Hugging Face BART summarization running on CPU, plus Gemini | Worked, but took several minutes per chapter |
+| v1.5 | BART through the Hugging Face hosted API | Required paid credits (error 402) |
+| **v2 (current)** | Gemini for summary and flashcards, MiniLM for key sentences | Seconds per chapter, free to run |
+
+---
+
+## ▶️ Run it yourself
+```bash
+pip install -r requirements.txt
+export GEMINI_API_KEY="your-key"      # Windows CMD: set GEMINI_API_KEY=your-key
+streamlit run app.py
+```
+Get a free Gemini API key at https://aistudio.google.com/apikey.
+
+**Deploying on Streamlit Community Cloud:** connect this repo, set the main file to `app.py`, and add `GEMINI_API_KEY = "your-key"` under **Advanced settings > Secrets**.
+
+---
+
+## 📁 Project files
+| File | Purpose |
+|---|---|
+| `app.py` | The Streamlit app |
+| `requirements.txt` | Python libraries needed |
+| `.streamlit/config.toml` | Colour theme (ink purple and highlighter yellow) |
+
+---
+
+## ⚠️ Limitations and future work
+- Scanned PDFs (images of text) are not supported yet. OCR could be added.
+- History is cleared when the page is refreshed. User accounts and a database would make it permanent.
+- AI output can contain mistakes. Students should check the summary against the key sentences.
+- Planned: a quiz mode with scoring and retrying wrong answers.
+
+---
