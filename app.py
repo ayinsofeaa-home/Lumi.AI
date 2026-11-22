@@ -1,4 +1,4 @@
-"""Lumi.AI: turn a long chapter PDF into a revision summary, key sentences and flashcards.
+"""Lumi.AI: turn a long chapter (PDF, slides, Word, text) into a revision summary, key sentences and flashcards.
 
 AI tools
   - Gemini (Flash-Lite): writes the summary and flashcards in ONE request
@@ -158,9 +158,10 @@ with st.sidebar:
     language = st.radio("Language", ["English", "Bahasa Melayu"], horizontal=True)
     difficulty = st.select_slider("Flashcard difficulty", list(DIFFICULTY), value="Medium")
     n_cards = st.slider("Number of flashcards", 5, 25, 10)
-    max_pages = st.number_input("Max pages to read", 1, 300, 60)
+    max_pages = st.number_input("Max pages / slides to read", 1, 300, 60)
 
-uploaded = st.file_uploader("📄 Upload your chapter (PDF)", type="pdf")
+uploaded = st.file_uploader("📄 Upload your chapter (PDF, PowerPoint, Word or text)",
+                            type=["pdf", "pptx", "docx", "txt"])
 
 if uploaded and st.button("· Generate study pack", type="primary"):
     if not api_key:
@@ -168,10 +169,10 @@ if uploaded and st.button("· Generate study pack", type="primary"):
         st.stop()
 
     start = time.time()
-    with st.spinner("Reading your PDF..."):
-        text, total_pages = extract_text(uploaded, max_pages)
+    with st.spinner("Reading your file..."):
+        text, used, total, unit = extract_text(uploaded, max_pages)
     if len(text.split()) < 100:
-        st.error("Almost no text found. This PDF may be scanned images, which need OCR first.")
+        st.error("Almost no text found. The file may be scanned images, or too short.")
         st.stop()
 
     try:
@@ -187,7 +188,7 @@ if uploaded and st.button("· Generate study pack", type="primary"):
             "summary": result["summary"],
             "cards": result["flashcards"],
             "quotes": quotes,
-            "info": f"Read {min(total_pages, max_pages)} of {total_pages} pages "
+            "info": f"Read {used} of {total} {unit} "
                     f"({len(text.split()):,} words) in {time.time() - start:.1f} s "
                     f"· Gemini model: {model_used}",
         }
@@ -205,7 +206,7 @@ if pack:
         st.download_button("⬇️ Download summary", pack["summary"], "lumi_summary.txt")
 
     with tab_quotes:
-        st.caption("The most important sentences from your original PDF, picked by a "
+        st.caption("The most important sentences from your original file, picked by a "
                    "Hugging Face model. Use them to check the AI summary.")
         for q in pack["quotes"]:
             st.markdown(f'<div class="lumi-quote">“{html.escape(q)}”</div>',
