@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import streamlit as st
+from pydantic import BaseModel
 from PyPDF2 import PdfReader
 
 GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"]
@@ -166,6 +167,15 @@ KEY SENTENCES:
 MATERIAL:
 {text[:MAX_CHARS]}"""
 
+class Flashcard(BaseModel):
+    question: str
+    answer: str
+
+class StudyPack(BaseModel):  # the exact JSON shape Gemini must return
+    summary: str
+    flashcards: list[Flashcard]
+    key_sentences: list[str]
+
 def ask_gemini(api_key, prompt):
     from google import genai
     from google.genai import errors, types
@@ -176,7 +186,8 @@ def ask_gemini(api_key, prompt):
                 resp = client.models.generate_content(
                     model=name,
                     contents=prompt,
-                    config=types.GenerateContentConfig(response_mime_type="application/json"),
+                    config=types.GenerateContentConfig(response_mime_type="application/json",
+                                                       response_schema=StudyPack),
                 )
                 return json.loads(resp.text), name
             except errors.APIError as e:
@@ -228,6 +239,8 @@ def render_pack(pack, idx):
                     'picked by a Hugging Face model and translated into your chosen '
                     'language. The original wording is shown underneath, so you can '
                     'double-check the AI.</div>', unsafe_allow_html=True)
+        if pack.get("note"):
+            st.warning(pack["note"])
         for q in pack["quotes"]:
             original = ""
             if q["translated"].strip() != q["original"].strip():
@@ -349,11 +362,15 @@ with left:
                 st.write("🧠 Writing summary and flashcards, translating key sentences (Gemini)...")
                 result, model_used = ask_gemini(
                     api_key, build_prompt(text, language, difficulty, n_cards, originals))
-                translated = result.get("key_sentences") or []
-                if len(translated) != len(originals):  # Gemini skipped some: keep originals
-                    translated = originals
-                quotes = [{"original": o, "translated": str(t)}
-                          for o, t in zip(originals, translated)]
+                translated = [str(t) for t in (result.get("key_sentences") or [])]
+                note = ""
+                if len(translated) != len(originals):
+                    note = (f"Gemini translated {len(translated)} of {len(originals)} key "
+                            "sentences. Any missing ones are shown in the original language.")
+                # use each translation if there is one, otherwise keep the original
+                quotes = [{"original": o,
+                           "translated": translated[i] if i < len(translated) else o}
+                          for i, o in enumerate(originals)]
                 status.update(label=f"Done in {time.time() - start:.1f} seconds!",
                               state="complete", expanded=False)
             st.session_state.history.append({
@@ -362,6 +379,7 @@ with left:
                 "summary": result["summary"],
                 "cards": result["flashcards"],
                 "quotes": quotes,
+                "note": note,
                 "info": f"{used} of {total} {unit} · {len(text.split()):,} words · "
                         f"{time.time() - start:.1f} s · {language} · {difficulty} · "
                         f"Gemini: {model_used}",
