@@ -75,8 +75,8 @@ def gemini_json(api_key: str, prompt: str):
     resp = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json",
-                                           temperature=0.3),
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+
     )
     return json.loads(resp.text)
 
