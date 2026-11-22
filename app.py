@@ -2,7 +2,8 @@
 key sentences and flashcards.
 
 AI tools
-  - Gemini (Flash-Lite): writes the summary and flashcards in ONE request
+  - Gemini (Flash-Lite): writes the summary and flashcards and translates the
+    key sentences, all in ONE request
   - Hugging Face all-MiniLM-L6-v2: picks the most important original sentences
 """
 import csv
@@ -12,7 +13,6 @@ import json
 import os
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -89,6 +89,7 @@ header[data-testid="stHeader"] { background: transparent; }
     padding: 10px 14px; margin-bottom: 10px; color: #2B2450;
 }
 .lumi-quote mark { background: linear-gradient(transparent 60%, #FFE066 60%); color: inherit; }
+.lumi-original { margin-top: 6px; font-size: 0.82rem; color: #8A85A3; font-style: italic; }
 
 /* Buttons */
 .stButton > button, .stDownloadButton > button { border-radius: 10px; font-weight: 700; }
@@ -149,13 +150,19 @@ DIFFICULTY = {
     "Exam-style": "exam-style questions that ask students to explain, compare or apply concepts",
 }
 
-def build_prompt(text, language, difficulty, n_cards):
+def build_prompt(text, language, difficulty, n_cards, quotes):
+    numbered = "
+".join(f"{i + 1}. {q}" for i, q in enumerate(quotes))
     return f"""You are a study coach for diploma students.
 From the study material below, write in {language}:
 1. "summary": a revision summary of at most 350 words that fits on one page, using short paragraphs and bullet points.
 2. "flashcards": {n_cards} question-and-answer flashcards. Use {DIFFICULTY[difficulty]}. Each tests one idea. Answers max 2 sentences.
+3. "key_sentences": translate each of the {len(quotes)} KEY SENTENCES below into {language}, in the same order. Keep the meaning exact. If a sentence is already in {language}, copy it unchanged.
 Use only facts from the material.
-Return JSON: {{"summary": "...", "flashcards": [{{"question": "...", "answer": "..."}}]}}
+Return JSON: {{"summary": "...", "flashcards": [{{"question": "...", "answer": "..."}}], "key_sentences": ["...", "..."]}}
+
+KEY SENTENCES:
+{numbered}
 
 MATERIAL:
 {text[:MAX_CHARS]}"""
@@ -218,12 +225,17 @@ def render_pack(pack, idx):
                            "lumi_summary.txt", key=f"dl_sum_{idx}")
 
     with tab_quotes:
-        st.markdown('<div class="lumi-hint">The most important sentences copied '
-                    'word-for-word from your file, picked by a Hugging Face model. '
-                    'Use them to double-check the AI summary.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="lumi-hint">The most important sentences from your file, '
+                    'picked by a Hugging Face model and translated into your chosen '
+                    'language. The original wording is shown underneath, so you can '
+                    'double-check the AI.</div>', unsafe_allow_html=True)
         for q in pack["quotes"]:
-            st.markdown(f'<div class="lumi-quote"><mark>{html.escape(q)}</mark></div>',
-                        unsafe_allow_html=True)
+            original = ""
+            if q["translated"].strip() != q["original"].strip():
+                original = (f'<div class="lumi-original">Original: '
+                            f'{html.escape(q["original"])}</div>')
+            st.markdown(f'<div class="lumi-quote"><mark>{html.escape(q["translated"])}</mark>'
+                        f'{original}</div>', unsafe_allow_html=True)
 
     with tab_cards:
         st.markdown('<div class="lumi-hint">Try to answer each question in your head, '
@@ -333,14 +345,16 @@ with left:
         try:
             with st.status("Lumi is studying your notes...", expanded=True) as status:
                 st.write(f"📖 Read {used} {unit} ({len(text.split()):,} words)")
-                st.write("🧠 Writing summary and flashcards, finding key sentences...")
-                minilm = load_minilm()  # load once, outside the thread
-                with ThreadPoolExecutor() as pool:   # run both AI tools at the same time
-                    gemini_job = pool.submit(ask_gemini, api_key,
-                                             build_prompt(text, language, difficulty, n_cards))
-                    quotes_job = pool.submit(key_sentences, text, minilm)
-                    result, model_used = gemini_job.result()
-                    quotes = quotes_job.result()
+                st.write("📌 Finding key sentences (Hugging Face MiniLM)...")
+                originals = key_sentences(text, load_minilm())
+                st.write("🧠 Writing summary and flashcards, translating key sentences (Gemini)...")
+                result, model_used = ask_gemini(
+                    api_key, build_prompt(text, language, difficulty, n_cards, originals))
+                translated = result.get("key_sentences") or []
+                if len(translated) != len(originals):  # Gemini skipped some: keep originals
+                    translated = originals
+                quotes = [{"original": o, "translated": str(t)}
+                          for o, t in zip(originals, translated)]
                 status.update(label=f"Done in {time.time() - start:.1f} seconds!",
                               state="complete", expanded=False)
             st.session_state.history.append({
