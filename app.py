@@ -69,16 +69,25 @@ def one_page_summary(text: str, progress) -> str:
 
 # ---------- Gemini ----------
 def gemini_json(api_key: str, prompt: str):
+    import time
     from google import genai
-    from google.genai import types
+    from google.genai import errors, types
     client = genai.Client(api_key=api_key)
-    resp = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    for attempt in range(4):
+        try:
+            resp = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+            return json.loads(resp.text)
+        except errors.APIError as e:
+            # 429 = rate limit, 500/503 = server busy: wait and retry
+            if e.code in (429, 500, 503) and attempt < 3:
+                time.sleep(2 ** (attempt + 1))  # wait 2s, 4s, then 8s
+                continue
+            raise
 
-    )
-    return json.loads(resp.text)
 
 
 def make_flashcards(api_key: str, text: str, n: int):
