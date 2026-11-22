@@ -1,193 +1,205 @@
-"""Lumi.AI: PDF chapter -> 1-page summary, mind map, flashcards.
+"""Lumi.AI: turn a long chapter PDF into a revision summary, key sentences and flashcards.
 
-Pipeline
-  PyPDF2 (extract text)
-  -> Hugging Face BART (facebook/bart-large-cnn) chunked, 2-stage summary
-  -> Gemini (mind map + flashcards, returned as JSON)
+AI tools
+  - Gemini (Flash-Lite): writes the summary and flashcards in ONE request
+  - Hugging Face all-MiniLM-L6-v2: picks the most important original sentences
 """
 import csv
+import html
 import io
 import json
 import os
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import streamlit as st
 from PyPDF2 import PdfReader
 
-BART_MODEL = "facebook/bart-large-cnn"
-GEMINI_MODEL = "gemini-3.8-flash"
-CHUNK_WORDS = 500          # BART input limit is ~1024 tokens; 500 words is safe
-MAX_GEMINI_CHARS = 60000   # cap text sent to Gemini
+GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"]
+MINILM = "sentence-transformers/all-MiniLM-L6-v2"
+MAX_CHARS = 120_000  # about 50 pages of text sent to Gemini
 
+st.set_page_config(page_title="Lumi.AI", page_icon="💡", layout="wide")
+
+# ---------- Styling (purple, black, yellow) ----------
+st.markdown("""
+<style>
+.lumi-banner {
+    background: linear-gradient(135deg, #5B2A86 0%, #2A1B47 55%, #0E0B16 100%);
+    border: 1px solid #FFD23F55; border-radius: 18px;
+    padding: 28px 32px; margin-bottom: 20px;
+}
+.lumi-banner h1 { color: #FFD23F; margin: 0; font-size: 2.6rem; }
+.lumi-banner p  { color: #E9E3FF; margin: 6px 0 0 0; font-size: 1.05rem; }
+.lumi-card {
+    background: #2A1B47; border-left: 5px solid #FFD23F; border-radius: 12px;
+    padding: 14px 18px; margin-bottom: 12px;
+}
+.lumi-card summary { cursor: pointer; font-weight: 600; color: #FFFFFF; }
+.lumi-card .answer { color: #FFD23F; margin-top: 10px; }
+.lumi-quote {
+    background: #1A1230; border-left: 4px solid #9B6BFF; border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 10px; font-style: italic;
+}
+.stButton > button, .stDownloadButton > button {
+    border-radius: 10px; font-weight: 700;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---------- PDF ----------
-def extract_text(file) -> str:
+def extract_text(file, max_pages: int):
     reader = PdfReader(file)
-    pages = [(p.extract_text() or "") for p in reader.pages]
-    return "\n".join(pages)
+    pages = reader.pages[:max_pages]
+    text = " ".join((p.extract_text() or "") for p in pages)
+    return " ".join(text.split()), len(reader.pages)  # also removes line breaks
 
+# ---------- Hugging Face: MiniLM key sentences ----------
+@st.cache_resource(show_spinner="Loading Hugging Face model...")
+def load_minilm():
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(MINILM)
 
-def chunk_words(text: str, size: int = CHUNK_WORDS):
-    words = text.split()
-    for i in range(0, len(words), size):
-        yield " ".join(words[i:i + size])
+def key_sentences(text: str, model, k: int = 8):
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text)
+                 if 6 <= len(s.split()) <= 60]
+    if len(sentences) <= k:
+        return sentences
+    vectors = model.encode(sentences, normalize_embeddings=True, batch_size=64)
+    centre = vectors.mean(axis=0)            # the chapter's "main idea"
+    scores = vectors @ centre                # closeness of each sentence to it
+    top = sorted(np.argsort(scores)[-k:])    # best k, kept in original order
+    return [sentences[i] for i in top]
 
+# ---------- Gemini: summary + flashcards ----------
+DIFFICULTY = {
+    "Easy": "simple recall questions about definitions and facts",
+    "Medium": "questions that check understanding of how and why things work",
+    "Exam-style": "exam-style questions that ask students to explain, compare or apply concepts",
+}
 
-# ---------- BART ----------
-@st.cache_resource(show_spinner="Loading BART model (first run downloads ~1.6 GB)...")
-def load_summarizer():
-    from transformers import pipeline
-    return pipeline("summarization", model=BART_MODEL)
+def build_prompt(text, language, difficulty, n_cards):
+    return f"""You are a study coach for diploma students.
+From the study material below, write in {language}:
+1. "summary": a revision summary of at most 350 words that fits on one page, using short paragraphs and bullet points.
+2. "flashcards": {n_cards} question-and-answer flashcards. Use {DIFFICULTY[difficulty]}. Each tests one idea. Answers max 2 sentences.
+Use only facts from the material.
+Return JSON: {{"summary": "...", "flashcards": [{{"question": "...", "answer": "..."}}]}}
 
+MATERIAL:
+{text[:MAX_CHARS]}"""
 
-def bart_summarize(text: str, max_len: int, min_len: int) -> str:
-    summarizer = load_summarizer()
-    n_words = len(text.split())
-    max_len = min(max_len, max(30, int(n_words * 0.8)))
-    min_len = min(min_len, max_len - 5)
-    out = summarizer(text, max_length=max_len, min_length=min_len, do_sample=False,
-                     truncation=True)
-    return out[0]["summary_text"].strip()
-
-
-def one_page_summary(text: str, progress) -> str:
-    """Stage 1: summarise each chunk. Stage 2: summarise the joined partials."""
-    chunks = list(chunk_words(text))
-    partials = []
-    for i, ch in enumerate(chunks):
-        if len(ch.split()) < 40:
-            continue
-        partials.append(bart_summarize(ch, max_len=130, min_len=40))
-        progress.progress((i + 1) / len(chunks), text=f"Summarising chunk {i + 1}/{len(chunks)}")
-    joined = " ".join(partials)
-    # Keep reducing until the text fits roughly one page (~350 words).
-    while len(joined.split()) > 350 and len(partials) > 1:
-        partials = [bart_summarize(c, 130, 40) for c in chunk_words(joined)
-                    if len(c.split()) >= 40] or partials[:1]
-        joined = " ".join(partials)
-    return joined
-
-
-# ---------- Gemini ----------
-def gemini_json(api_key: str, prompt: str):
-    import time
+def ask_gemini(api_key, prompt):
     from google import genai
     from google.genai import errors, types
     client = genai.Client(api_key=api_key)
-    for attempt in range(4):
-        try:
-            resp = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
-            )
-            return json.loads(resp.text)
-        except errors.APIError as e:
-            # 429 = rate limit, 500/503 = server busy: wait and retry
-            if e.code in (429, 500, 503) and attempt < 3:
-                time.sleep(2 ** (attempt + 1))  # wait 2s, 4s, then 8s
-                continue
-            raise
+    for name in GEMINI_MODELS:              # main model, then backups
+        for attempt in range(2):            # 2 tries per model
+            try:
+                resp = client.models.generate_content(
+                    model=name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json"),
+                )
+                return json.loads(resp.text), name
+            except errors.APIError as e:
+                if e.code not in (429, 500, 503):   # only retry when busy
+                    raise
+                time.sleep(2)
+    raise RuntimeError("All Gemini models are busy right now. Please try again in a minute.")
 
-
-
-def make_flashcards(api_key: str, text: str, n: int):
-    prompt = (
-        f"You are a study coach. From the study material below, write {n} flashcards "
-        "for exam revision. Each must test one idea, with a short question and a "
-        "concise answer (max 2 sentences). Use only facts from the material. "
-        'Return JSON: [{"question": "...", "answer": "..."}].\n\n'
-        f"MATERIAL:\n{text[:MAX_GEMINI_CHARS]}"
-    )
-    return gemini_json(api_key, prompt)
-
-
-def make_mindmap(api_key: str, text: str):
-    prompt = (
-        "Extract a mind map of the key concepts from the study material below. "
-        "Use one central topic, 4-7 main branches, and 2-4 sub-points per branch. "
-        "Labels must be 1-5 words. "
-        'Return JSON: {"topic": "...", "branches": [{"name": "...", "children": ["..."]}]}.\n\n'
-        f"MATERIAL:\n{text[:MAX_GEMINI_CHARS]}"
-    )
-    return gemini_json(api_key, prompt)
-
-
-def mindmap_to_dot(mm: dict) -> str:
-    def esc(s):
-        return str(s).replace('"', "'")
-    lines = ["digraph G {", "rankdir=LR;",
-             'node [shape=box, style="rounded,filled", fontname="Helvetica"];',
-             f'root [label="{esc(mm["topic"])}", fillcolor="#ffd966", fontsize=16];']
-    for i, b in enumerate(mm.get("branches", [])):
-        lines.append(f'b{i} [label="{esc(b["name"])}", fillcolor="#9fc5e8"];')
-        lines.append(f"root -> b{i};")
-        for j, c in enumerate(b.get("children", [])):
-            lines.append(f'c{i}_{j} [label="{esc(c)}", fillcolor="#d9ead3"];')
-            lines.append(f"b{i} -> c{i}_{j};")
-    lines.append("}")
-    return "\n".join(lines)
-
-
-def cards_to_csv(cards) -> str:
+def cards_to_csv(cards):
     buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["Question", "Answer"])  # Anki/Quizlet-friendly
+    writer = csv.writer(buf)
+    writer.writerow(["Question", "Answer"])  # imports into Anki / Quizlet
     for c in cards:
-        w.writerow([c["question"], c["answer"]])
+        writer.writerow([c["question"], c["answer"]])
     return buf.getvalue()
 
-
-# ---------- UI ----------
-st.set_page_config(page_title="Lumi.AI", page_icon="💡", layout="wide")
-st.title("💡 Lumi.AI")
-st.caption("Upload a chapter PDF. Get a 1-page summary, a mind map and flashcards.")
+# ---------- Page ----------
+st.markdown("""
+<div class="lumi-banner">
+  <h1>💡 Lumi.AI</h1>
+  <p>Drop in a long chapter. Get a 1-page summary, key textbook sentences and flashcards in seconds.</p>
+</div>
+""", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("Settings")
-    api_key = st.text_input("Gemini API key", type="password",
-                            value=os.getenv("GEMINI_API_KEY", ""),
-                            help="Free key at https://aistudio.google.com/apikey")
-    n_cards = st.slider("Number of flashcards", 5, 30, 12)
-    max_pages = st.number_input("Max pages to read", 1, 200, 60)
-
-uploaded = st.file_uploader("Chapter PDF", type="pdf")
-
-if uploaded and st.button("Generate study pack", type="primary"):
+    st.header("⚙️ Settings")
+    api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
-        st.error("Enter a Gemini API key in the sidebar.")
+        api_key = st.text_input("Gemini API key", type="password",
+                                help="Free key at https://aistudio.google.com/apikey")
+    language = st.radio("Language", ["English", "Bahasa Melayu"], horizontal=True)
+    difficulty = st.select_slider("Flashcard difficulty", list(DIFFICULTY), value="Medium")
+    n_cards = st.slider("Number of flashcards", 5, 25, 10)
+    max_pages = st.number_input("Max pages to read", 1, 300, 60)
+
+uploaded = st.file_uploader("📄 Upload your chapter (PDF)", type="pdf")
+
+if uploaded and st.button("· Generate study pack", type="primary"):
+    if not api_key:
+        st.error("Please enter a Gemini API key in the sidebar.")
         st.stop()
 
-    with st.spinner("Reading PDF..."):
-        reader = PdfReader(uploaded)
-        total = len(reader.pages)
-        text = "\n".join((p.extract_text() or "") for p in reader.pages[:max_pages])
+    start = time.time()
+    with st.spinner("Reading your PDF..."):
+        text, total_pages = extract_text(uploaded, max_pages)
     if len(text.split()) < 100:
-        st.error("Almost no text found. The PDF may be scanned images (needs OCR).")
+        st.error("Almost no text found. This PDF may be scanned images, which need OCR first.")
         st.stop()
-    st.info(f"Read {min(total, max_pages)} of {total} pages, {len(text.split()):,} words.")
 
     try:
-        bar = st.progress(0.0, text="Starting summary...")
-        summary = one_page_summary(text, bar)
-        bar.empty()
-        with st.spinner("Gemini is building the mind map and flashcards..."):
-            # Use the BART summary + raw text excerpt so Gemini stays grounded.
-            mindmap = make_mindmap(api_key, text)
-            cards = make_flashcards(api_key, text, n_cards)
-        st.session_state["pack"] = {"summary": summary, "mindmap": mindmap, "cards": cards}
-    except Exception as e:  # noqa: BLE001 - show any API/model error to the user
-        st.error(f"Failed: {e}")
+        with st.spinner("Lumi is studying your chapter..."):
+            minilm = load_minilm()  # load once, outside the thread
+            with ThreadPoolExecutor() as pool:   # run both AI tools at the same time
+                gemini_job = pool.submit(ask_gemini, api_key,
+                                         build_prompt(text, language, difficulty, n_cards))
+                quotes_job = pool.submit(key_sentences, text, minilm)
+                result, model_used = gemini_job.result()
+                quotes = quotes_job.result()
+        st.session_state["pack"] = {
+            "summary": result["summary"],
+            "cards": result["flashcards"],
+            "quotes": quotes,
+            "info": f"Read {min(total_pages, max_pages)} of {total_pages} pages "
+                    f"({len(text.split()):,} words) in {time.time() - start:.1f} s "
+                    f"· Gemini model: {model_used}",
+        }
+    except Exception as e:  # show API errors on the page
+        st.error(f"Something went wrong: {e}")
 
 pack = st.session_state.get("pack")
 if pack:
-    tab1, tab2, tab3 = st.tabs(["📝 Summary", "🧠 Mind map", "🃏 Flashcards"])
-    with tab1:
-        st.write(pack["summary"])
-        st.download_button("Download summary (.txt)", pack["summary"], "summary.txt")
-    with tab2:
-        st.graphviz_chart(mindmap_to_dot(pack["mindmap"]), use_container_width=True)
-    with tab3:
+    st.success(pack["info"])
+    tab_sum, tab_quotes, tab_cards = st.tabs(
+        ["📝 Summary", "📌 Key sentences", "🃏 Flashcards"])
+
+    with tab_sum:
+        st.markdown(pack["summary"])
+        st.download_button("⬇️ Download summary", pack["summary"], "lumi_summary.txt")
+
+    with tab_quotes:
+        st.caption("The most important sentences from your original PDF, picked by a "
+                   "Hugging Face model. Use them to check the AI summary.")
+        for q in pack["quotes"]:
+            st.markdown(f'<div class="lumi-quote">“{html.escape(q)}”</div>',
+                        unsafe_allow_html=True)
+
+    with tab_cards:
+        st.caption("Click a question to reveal the answer.")
         for i, c in enumerate(pack["cards"], 1):
+            st.markdown(
+                f'<div class="lumi-card"><details>'
+                f'<summary>Q{i}. {html.escape(c["question"])}</summary>'
+                f'<div class="answer">{html.escape(c["answer"])}</div>'
+                f'</details></div>',
+                unsafe_allow_html=True)
+        st.download_button("⬇️ Download flashcards (CSV for Anki/Quizlet)",
+                           cards_to_csv(pack["cards"]), "lumi_flashcards.csv", "text/csv")
+
             with st.expander(f"Q{i}. {c['question']}"):
                 st.write(c["answer"])
         st.download_button("Download flashcards (.csv)", cards_to_csv(pack["cards"]),
