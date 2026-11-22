@@ -151,7 +151,7 @@ DIFFICULTY = {
 }
 
 def build_prompt(text, language, difficulty, n_cards, quotes):
-        numbered = chr(10).join(f"{i + 1}. {q}" for i, q in enumerate(quotes))  # chr(10) = new line
+    numbered = chr(10).join(f"{i + 1}. {q}" for i, q in enumerate(quotes))  # chr(10) = new line
     return f"""You are a study coach for diploma students.
 From the study material below, write in {language}:
 1. "summary": a revision summary of at most 350 words that fits on one page, using short paragraphs and bullet points.
