@@ -14,7 +14,7 @@ import streamlit as st
 from PyPDF2 import PdfReader
 
 BART_MODEL = "facebook/bart-large-cnn"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
 CHUNK_WORDS = 500          # BART input limit is ~1024 tokens; 500 words is safe
 MAX_GEMINI_CHARS = 60000   # cap text sent to Gemini
 
