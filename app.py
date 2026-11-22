@@ -199,8 +199,3 @@ if pack:
                 unsafe_allow_html=True)
         st.download_button("⬇️ Download flashcards (CSV for Anki/Quizlet)",
                            cards_to_csv(pack["cards"]), "lumi_flashcards.csv", "text/csv")
-
-            with st.expander(f"Q{i}. {c['question']}"):
-                st.write(c["answer"])
-        st.download_button("Download flashcards (.csv)", cards_to_csv(pack["cards"]),
-                           "flashcards.csv", "text/csv")
