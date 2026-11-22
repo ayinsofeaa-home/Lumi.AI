@@ -49,12 +49,35 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- PDF ----------
+# ---------- Read the file (PDF, PowerPoint, Word, text) ----------
 def extract_text(file, max_pages: int):
-    reader = PdfReader(file)
-    pages = reader.pages[:max_pages]
-    text = " ".join((p.extract_text() or "") for p in pages)
-    return " ".join(text.split()), len(reader.pages)  # also removes line breaks
+    """Return (clean text, number of pages/slides read, total, unit name)."""
+    name = file.name.lower()
+    if name.endswith(".pdf"):
+        reader = PdfReader(file)
+        total = len(reader.pages)
+        parts = [(p.extract_text() or "") for p in reader.pages[:max_pages]]
+        unit = "pages"
+    elif name.endswith(".pptx"):
+        from pptx import Presentation
+        slides = list(Presentation(file).slides)
+        total = len(slides)
+        parts = []
+        for slide in slides[:max_pages]:
+            for shape in slide.shapes:
+                if shape.has_text_frame and shape.text_frame.text.strip():
+                    # slide bullets often have no full stop, so add one
+                    parts.append(shape.text_frame.text.strip().rstrip(".") + ".")
+        unit = "slides"
+    elif name.endswith(".docx"):
+        from docx import Document
+        parts = [p.text for p in Document(file).paragraphs if p.text.strip()]
+        total, unit = 1, "document"
+    else:  # .txt
+        parts = [file.read().decode("utf-8", errors="ignore")]
+        total, unit = 1, "document"
+    text = " ".join(" ".join(parts).split())  # also removes line breaks
+    return text, min(total, max_pages), total, unit
 
 # ---------- Hugging Face: MiniLM key sentences ----------
 @st.cache_resource(show_spinner="Loading Hugging Face model...")
