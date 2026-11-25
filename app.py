@@ -180,6 +180,7 @@ def ask_gemini(api_key, prompt):
     from google import genai
     from google.genai import errors, types
     client = genai.Client(api_key=api_key)
+    codes = []                              # error code from each model, for the message
     for name in GEMINI_MODELS:              # main model, then backups
         for attempt in range(2):            # 2 tries per model
             try:
@@ -191,10 +192,18 @@ def ask_gemini(api_key, prompt):
                 )
                 return json.loads(resp.text), name
             except errors.APIError as e:
-                if e.code not in (429, 500, 503):   # only retry when busy
-                    raise
-                time.sleep(2)
-    raise RuntimeError("All Gemini models are busy right now. Please try again in a minute.")
+                codes.append(e.code)
+                if e.code in (400, 401, 403):   # bad or missing API key: no point retrying
+                    raise RuntimeError("The Gemini API key was rejected. Check the "
+                                       "GEMINI_API_KEY secret.") from e
+                if e.code == 404:               # model renamed or retired: try the next one
+                    break
+                time.sleep(2)                   # busy (503) or rate limit (429): wait, retry
+    if 429 in codes:
+        raise RuntimeError("Lumi.AI has reached its free Gemini limit for now. Please wait "
+                           "a minute and try again. (If it keeps happening, the daily "
+                           "limit is used up and resets tomorrow.)")
+    raise RuntimeError("Gemini is very busy right now. Please wait a minute and try again.")
 
 def cards_to_csv(cards):
     buf = io.StringIO()
