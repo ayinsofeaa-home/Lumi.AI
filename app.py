@@ -20,7 +20,7 @@ import streamlit as st
 from pydantic import BaseModel
 from PyPDF2 import PdfReader
 
-GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"]
+GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 MINILM = "sentence-transformers/all-MiniLM-L6-v2"
 MAX_CHARS = 120_000  # about 50 pages of text sent to Gemini
 MYT = timezone(timedelta(hours=8))  # Malaysia time for the history list
